@@ -1,0 +1,21 @@
+# Model-critical libs are pinned so the pickled model loads identically
+# in Codespaces, CI, Docker and the lab. Use Python 3.11+ (3.12 recommended).
+pandas==3.0.6
+numpy==2.5.4
+scikit-learn==1.9.1
+scipy==1.18.1
+joblib==1.6.0
+matplotlib>=3.7
+seaborn>=0.12
+mlflow>=3.0
+ucimlrepo>=0.0.7
+requests>=2.31
+# serving
+fastapi>=0.110
+uvicorn>=0.27
+pydantic>=2.0
+prometheus-client>=0.19
+# dev / test
+pytest>=7.4
+httpx>=0.26
+flake8>=6.0
