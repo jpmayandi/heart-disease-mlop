@@ -5,7 +5,7 @@ metadata:
   labels:
     app: heart-api
 spec:
-  type: NodePort        # use `minikube tunnel` + type LoadBalancer if preferred
+  type: LoadBalancer    
   selector:
     app: heart-api
   ports:
