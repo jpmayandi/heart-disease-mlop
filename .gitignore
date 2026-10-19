@@ -1,0 +1,6 @@
+
+# installers (too big for GitHub)
+minikube-linux-amd64
+kubectl
+*.deb
+*.tar.gz
