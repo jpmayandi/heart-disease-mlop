@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    name: Lint, test, train, and smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt
+
+      - name: Lint
+        run: flake8 src api tests scripts
+
+      - name: Run tests
+        run: pytest -v
+
+      - name: Train model
+        run: python -m src.train
+
+      - name: Build and smoke test Docker image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -t heart-disease-api:ci .
+          docker run -d --name heart-api-ci -p 8000:8000 heart-disease-api:ci
+          for attempt in {1..30}; do
+            if curl --fail --silent http://localhost:8000/health; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker logs heart-api-ci
+              exit 1
+            fi
+            sleep 2
+          done
+          curl --fail --silent --show-error \
+            -X POST http://localhost:8000/predict \
+            -H 'Content-Type: application/json' \
+            --data-binary @sample_request.json
+          curl --fail --silent http://localhost:8000/metrics \
+            | grep -q '^model_loaded 1'
+          docker rm -f heart-api-ci
+
+      - name: Upload training artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-artifacts
+          path: |
+            models/model.joblib
+            models/metrics.json
+            mlflow.db
+            reports/figures/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-and-deploy:
+    name: Publish image and deploy to Minikube
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test-and-build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download training artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: training-artifacts
+
+      - name: Build container image
+        run: |
+          docker build \
+            -t heart-disease-api:latest \
+            -t ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA} \
+            .
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image to GitHub Container Registry
+        run: |
+          docker push "ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}"
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Install Minikube
+        run: |
+          curl --fail --silent --show-error --location \
+            https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64 \
+            --output /tmp/minikube
+          sudo install /tmp/minikube /usr/local/bin/minikube
+
+      - name: Start Minikube and load image
+        run: |
+          minikube start --driver=docker --wait=all --wait-timeout=5m
+          minikube image load heart-disease-api:latest
+
+      - name: Deploy and verify Kubernetes service
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml
+          kubectl rollout status deployment/heart-api --timeout=180s
+          kubectl scale deployment/heart-api --replicas=4
+          kubectl rollout status deployment/heart-api --timeout=180s
+          kubectl scale deployment/heart-api --replicas=2
+          kubectl rollout status deployment/heart-api --timeout=180s
+          kubectl get nodes
+          kubectl get pods,svc
+
+          kubectl port-forward service/heart-api 8080:80 \
+            >/tmp/heart-api-port-forward.log 2>&1 &
+          port_forward_pid=$!
+          trap 'kill "$port_forward_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent http://localhost:8080/health; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              cat /tmp/heart-api-port-forward.log
+              exit 1
+            fi
+            sleep 2
+          done
+          curl --fail --silent --show-error \
+            -X POST http://localhost:8080/predict \
+            -H 'Content-Type: application/json' \
+            --data-binary @sample_request.json
